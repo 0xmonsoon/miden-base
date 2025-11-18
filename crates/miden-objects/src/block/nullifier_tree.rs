@@ -40,9 +40,9 @@ pub(super) fn leaf_value_to_block_num(value: Word) -> BlockNumber {
 /// This trait abstracts over different SMT backends (e.g., `Smt` and `LargeSmt`) to allow
 /// the `NullifierTree` to work with either implementation transparently.
 ///
-/// Implementors must provide `Default` for creating empty instances. Users should
-/// instantiate the backend directly (potentially with entries) and then pass it to
-/// [`NullifierTree::new`].
+/// Implementors should provide the required methods. Users can construct backend instances
+/// however they wish (e.g., with `Smt::new()`, `Smt::with_entries()`, or 
+/// `LargeSmt::with_entries()`) and then pass them to [`NullifierTree::new_unchecked`].
 pub trait NullifierTreeBackend: Sized {
     type Error: core::error::Error + Send + 'static;
 
@@ -141,11 +141,16 @@ where
     fn num_entries(&self) -> usize {
         LargeSmt::num_entries(self)
             .map_err(large_smt_error_to_merkle_error)
+            // SAFETY: We panic on storage errors here as they represent unrecoverable I/O failures.
+            // This maintains API compatibility with the non-fallible Smt::num_entries().
+            // See issue #2010 for future improvements to error handling.
             .unwrap_or(0)
     }
 
     fn entries(&self) -> Box<dyn Iterator<Item = (Word, Word)> + '_> {
-        Box::new(LargeSmt::entries(self).expect("Only IO can error out here"))
+        // SAFETY: We expect here as only I/O errors can occur. Storage failures are considered
+        // unrecoverable at this layer. See issue #2010 for future error handling improvements.
+        Box::new(LargeSmt::entries(self).expect("Storage I/O error accessing entries"))
     }
 
     fn open(&self, key: &Word) -> SmtProof {
@@ -175,6 +180,9 @@ where
     }
 
     fn root(&self) -> Word {
+        // SAFETY: We unwrap here as storage errors are considered unrecoverable. This maintains
+        // API compatibility with the non-fallible Smt::root().
+        // See issue #2010 for future improvements to error handling.
         LargeSmt::root(self).map_err(large_smt_error_to_merkle_error).unwrap()
     }
 }
@@ -188,22 +196,22 @@ where
 /// not change. Note that inserting the nullifier multiple times with the same block number is
 /// valid.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NullifierTree<S = Smt> {
-    smt: S,
+pub struct NullifierTree<Backend = Smt> {
+    smt: Backend,
 }
 
-impl<S> Default for NullifierTree<S>
+impl<Backend> Default for NullifierTree<Backend>
 where
-    S: Default,
+    Backend: Default,
 {
     fn default() -> Self {
         Self { smt: Default::default() }
     }
 }
 
-impl<S> NullifierTree<S>
+impl<Backend> NullifierTree<Backend>
 where
-    S: NullifierTreeBackend<Error = MerkleError>,
+    Backend: NullifierTreeBackend<Error = MerkleError>,
 {
     // CONSTANTS
     // --------------------------------------------------------------------------------------------
@@ -226,8 +234,8 @@ where
     ///
     /// See type-level documentation for more details on these invariants. Using this constructor
     /// with an SMT that violates these guarantees may lead to undefined behavior.
-    pub fn new(smt: S) -> Self {
-        NullifierTree { smt }
+    pub fn new_unchecked(backend: Backend) -> Self {
+        NullifierTree { smt: backend }
     }
 
     // PUBLIC ACCESSORS
@@ -391,7 +399,7 @@ impl NullifierTree<Smt> {
         let smt = Smt::with_entries(leaves)
             .map_err(NullifierTreeError::DuplicateNullifierBlockNumbers)?;
 
-        Ok(Self::new(smt))
+        Ok(Self::new_unchecked(smt))
     }
 }
 
@@ -552,7 +560,7 @@ mod tests {
                 (nullifier2.as_word(), super::block_num_to_leaf_value(block2)),
             ],
         )
-        .map(NullifierTree::new)
+        .map(NullifierTree::new_unchecked)
         .unwrap();
 
         // Test basic operations
@@ -571,7 +579,7 @@ mod tests {
                 (nullifier2.as_word(), super::block_num_to_leaf_value(block2)),
             ],
         )
-        .map(NullifierTree::new)
+        .map(NullifierTree::new_unchecked)
         .unwrap();
         tree_mut.mark_spent(nullifier3, block3).unwrap();
         assert_eq!(tree_mut.num_nullifiers(), 3);
@@ -591,7 +599,7 @@ mod tests {
         let block1 = BlockNumber::from(1);
         let block2 = BlockNumber::from(2);
 
-        let mut tree = NullifierTree::new(
+        let mut tree = NullifierTree::new_unchecked(
             LargeSmt::with_entries(
                 MemoryStorage::default(),
                 [(nullifier1.as_word(), super::block_num_to_leaf_value(block1))],
@@ -602,7 +610,7 @@ mod tests {
         assert_eq!(tree.get_block_num(&nullifier1).unwrap(), block1);
 
         // Create a new tree for the first test
-        let mut tree_test1 = NullifierTree::new(
+        let mut tree_test1 = NullifierTree::new_unchecked(
             LargeSmt::with_entries(
                 MemoryStorage::default(),
                 [(nullifier1.as_word(), super::block_num_to_leaf_value(block1))],
@@ -633,7 +641,7 @@ mod tests {
             MemoryStorage::default(),
             [(nullifier1.as_word(), super::block_num_to_leaf_value(block1))],
         )
-        .map(NullifierTree::new)
+        .map(NullifierTree::new_unchecked)
         .unwrap();
 
         let mutations =
@@ -666,7 +674,7 @@ mod tests {
                 (nullifier2.as_word(), super::block_num_to_leaf_value(block2)),
             ],
         )
-        .map(NullifierTree::new)
+        .map(NullifierTree::new_unchecked)
         .unwrap();
 
         // Create tree with regular Smt backend
