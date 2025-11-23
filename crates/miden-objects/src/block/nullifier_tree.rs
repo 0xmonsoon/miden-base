@@ -7,6 +7,9 @@ use miden_core::utils::{ByteReader, ByteWriter, Deserializable, Serializable};
 use miden_crypto::merkle::{MerkleError, MutationSet, Smt, SmtProof};
 use miden_processor::{DeserializationError, SMT_DEPTH};
 
+#[cfg(feature = "std")]
+use miden_crypto::merkle::{LargeSmt, LargeSmtError, SmtStorage};
+
 use crate::Word;
 use crate::block::{BlockNumber, NullifierWitness};
 use crate::errors::NullifierTreeError;
@@ -19,7 +22,9 @@ use crate::note::Nullifier;
 pub(super) const UNSPENT_NULLIFIER: Word = EMPTY_WORD;
 
 /// Returns the nullifier's leaf value in the SMT by its block number.
-pub fn block_num_to_leaf_value(block: BlockNumber) -> Word {
+///
+/// Nullifier entries are encoded as `[block_number, 0, 0, 0]` in the tree.
+pub(super) fn block_num_to_leaf_value(block: BlockNumber) -> Word {
     Word::from([block.as_u32(), 0, 0, 0])
 }
 
@@ -37,8 +42,8 @@ pub(super) fn leaf_value_to_block_num(value: Word) -> BlockNumber {
 // NULLIFIER TREE BACKEND TRAIT
 // ================================================================================================
 
-/// This trait abstracts over different SMT backends (e.g., `Smt` and `LargeSmt`) to allow
-/// the `NullifierTree` to work with either implementation transparently.
+/// This trait abstracts over different SMT backends (e.g., `Smt` and `LargeSmt`) to allow the
+/// `NullifierTree` to work with either implementation transparently.
 ///
 /// Implementors should provide the required methods. Users can construct backend instances
 /// however they wish (e.g., with `Smt::new()`, `Smt::with_entries()`, or 
@@ -120,8 +125,6 @@ impl NullifierTreeBackend for Smt {
 }
 
 #[cfg(feature = "std")]
-use miden_crypto::merkle::{LargeSmt, LargeSmtError, SmtStorage};
-#[cfg(feature = "std")]
 fn large_smt_error_to_merkle_error(err: LargeSmtError) -> MerkleError {
     match err {
         LargeSmtError::Storage(storage_err) => {
@@ -139,12 +142,11 @@ where
     type Error = MerkleError;
 
     fn num_entries(&self) -> usize {
+        // SAFETY: Storage errors are unrecoverable I/O failures that we handle by panicking.
+        // This maintains API compatibility with Smt::num_entries() which cannot fail.
+        // See issue #2010 for future improvements to error handling.
         LargeSmt::num_entries(self)
-            .map_err(large_smt_error_to_merkle_error)
-            // SAFETY: We panic on storage errors here as they represent unrecoverable I/O failures.
-            // This maintains API compatibility with the non-fallible Smt::num_entries().
-            // See issue #2010 for future improvements to error handling.
-            .unwrap_or(0)
+            .expect("Storage I/O error in num_entries")
     }
 
     fn entries(&self) -> Box<dyn Iterator<Item = (Word, Word)> + '_> {
@@ -180,10 +182,10 @@ where
     }
 
     fn root(&self) -> Word {
-        // SAFETY: We unwrap here as storage errors are considered unrecoverable. This maintains
-        // API compatibility with the non-fallible Smt::root().
+        // SAFETY: Storage errors are unrecoverable I/O failures that we handle by panicking.
+        // This maintains API compatibility with Smt::root() which cannot fail.
         // See issue #2010 for future improvements to error handling.
-        LargeSmt::root(self).map_err(large_smt_error_to_merkle_error).unwrap()
+        LargeSmt::root(self).expect("Storage I/O error in LargeSmt::root")
     }
 }
 
@@ -306,7 +308,7 @@ where
                 nullifiers
                     .into_iter()
                     .map(|(nullifier, block_num)| {
-                        (nullifier.as_word(), Self::block_num_to_leaf_value(block_num))
+                        (nullifier.as_word(), block_num_to_leaf_value(block_num))
                     })
                     .collect::<Vec<_>>(),
             )
@@ -331,7 +333,7 @@ where
     ) -> Result<(), NullifierTreeError> {
         let prev_nullifier_value = self
             .smt
-            .insert(nullifier.as_word(), Self::block_num_to_leaf_value(block_num))
+            .insert(nullifier.as_word(), block_num_to_leaf_value(block_num))
             .map_err(NullifierTreeError::MaxLeafEntriesExceeded)?;
 
         if prev_nullifier_value != Self::UNSPENT_NULLIFIER {
@@ -358,11 +360,6 @@ where
 
     // HELPER FUNCTIONS
     // --------------------------------------------------------------------------------------------
-
-    /// Returns the nullifier's leaf value in the SMT by its block number.
-    pub(super) fn block_num_to_leaf_value(block: BlockNumber) -> Word {
-        Word::from([block.as_u32(), 0, 0, 0])
-    }
 
     /// Given the leaf value of the nullifier SMT, returns the nullifier's block number.
     ///
@@ -393,7 +390,7 @@ impl NullifierTree<Smt> {
         entries: impl IntoIterator<Item = (Nullifier, BlockNumber)>,
     ) -> Result<Self, NullifierTreeError> {
         let leaves = entries.into_iter().map(|(nullifier, block_num)| {
-            (nullifier.as_word(), Self::block_num_to_leaf_value(block_num))
+            (nullifier.as_word(), block_num_to_leaf_value(block_num))
         });
 
         let smt = Smt::with_entries(leaves)
