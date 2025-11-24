@@ -4,11 +4,10 @@ use alloc::vec::Vec;
 
 use miden_core::EMPTY_WORD;
 use miden_core::utils::{ByteReader, ByteWriter, Deserializable, Serializable};
-use miden_crypto::merkle::{MerkleError, MutationSet, Smt, SmtProof};
-use miden_processor::{DeserializationError, SMT_DEPTH};
-
 #[cfg(feature = "std")]
 use miden_crypto::merkle::{LargeSmt, LargeSmtError, SmtStorage};
+use miden_crypto::merkle::{MerkleError, MutationSet, Smt, SmtProof};
+use miden_processor::{DeserializationError, SMT_DEPTH};
 
 use crate::Word;
 use crate::block::{BlockNumber, NullifierWitness};
@@ -46,7 +45,7 @@ pub(super) fn leaf_value_to_block_num(value: Word) -> BlockNumber {
 /// `NullifierTree` to work with either implementation transparently.
 ///
 /// Implementors should provide the required methods. Users can construct backend instances
-/// however they wish (e.g., with `Smt::new()`, `Smt::with_entries()`, or 
+/// however they wish (e.g., with `Smt::new()`, `Smt::with_entries()`, or
 /// `LargeSmt::with_entries()`) and then pass them to [`NullifierTree::new_unchecked`].
 pub trait NullifierTreeBackend: Sized {
     type Error: core::error::Error + Send + 'static;
@@ -145,8 +144,7 @@ where
         // SAFETY: Storage errors are unrecoverable I/O failures that we handle by panicking.
         // This maintains API compatibility with Smt::num_entries() which cannot fail.
         // See issue #2010 for future improvements to error handling.
-        LargeSmt::num_entries(self)
-            .expect("Storage I/O error in num_entries")
+        LargeSmt::num_entries(self).expect("Storage I/O error in num_entries")
     }
 
     fn entries(&self) -> Box<dyn Iterator<Item = (Word, Word)> + '_> {
