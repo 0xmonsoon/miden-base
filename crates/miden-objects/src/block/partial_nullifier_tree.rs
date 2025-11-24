@@ -104,7 +104,7 @@ mod tests {
     use winter_rand_utils::rand_value;
 
     use super::*;
-    use crate::block::NullifierTree;
+    use crate::block::nullifier_tree::NullifierTree;
     use crate::{EMPTY_WORD, Word};
 
     /// Test that using a stale nullifier witness together with a current one results in a different
