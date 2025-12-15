@@ -32,12 +32,11 @@ pub use builder::AccountBuilder;
 
 pub mod code;
 pub use code::AccountCode;
-pub use code::procedure::AccountProcedureRoot;
+pub use code::procedure::AccountProcedureInfo;
 
 pub mod component;
 pub use component::{
     AccountComponent,
-    AccountComponentCode,
     // TODO(named_slots): Uncomment when refactored.
     // AccountComponentMetadata,
     // FeltRepresentation,
@@ -165,23 +164,31 @@ impl Account {
     /// Creates an account's [`AccountCode`] and [`AccountStorage`] from the provided components.
     ///
     /// This merges all libraries of the components into a single
-    /// [`MastForest`](miden_processor::MastForest) to produce the [`AccountCode`].
+    /// [`MastForest`](miden_processor::MastForest) to produce the [`AccountCode`]. For each
+    /// procedure in the resulting forest, the storage offset and size are set so that the
+    /// procedure can only access the storage slots of the component in which it was defined and
+    /// each component's storage offset is the total number of slots in the previous components.
+    /// To illustrate, given two components with one and two storage slots respectively:
     ///
-    /// The storage slots of all components are merged into a single [`AccountStorage`], where the
-    /// slots are sorted by their [`StorageSlotName`].
+    /// - RpoFalcon512 Component: Component slot 0 stores the public key.
+    /// - Custom Component: Component slot 0 stores a custom [`StorageSlotContent::Value`] and
+    ///   component slot 1 stores a custom [`StorageSlotContent::Map`].
+    ///
+    /// When combined, their assigned slots in the [`AccountStorage`] would be:
+    ///
+    /// - The RpoFalcon512 Component has offset 0 and size 1: Account slot 0 stores the public key.
+    /// - The Custom Component has offset 1 and size 2: Account slot 1 stores the value and account
+    ///   slot 2 stores the map.
     ///
     /// The resulting commitments from code and storage can then be used to construct an
     /// [`AccountId`]. Finally, a new account can then be instantiated from those parts using
     /// [`Account::new`].
     ///
-    /// If the account type is faucet the reserved slot ([`AccountStorage::faucet_metadata_slot`])
-    /// will be initialized as follows:
-    /// - For [`AccountType::FungibleFaucet`] the value is set to
-    ///   [`StorageSlotContent::empty_value`].
-    /// - For [`AccountType::NonFungibleFaucet`] the value is set to
-    ///   [`StorageSlotContent::empty_map`].
+    /// If the account type is faucet the reserved slot (slot 0) will be initialized.
+    /// - For Fungible Faucets the value is [`StorageSlot::empty_value`].
+    /// - For Non-Fungible Faucets the value is [`StorageSlot::empty_map`].
     ///
-    /// If the storage needs to be initialized with certain values in that slot, those must be added
+    /// If the storage needs to be initialized with certain values in that slot, those can be added
     /// after construction with the standard set methods for items and maps.
     ///
     /// # Errors
@@ -201,7 +208,7 @@ impl Account {
     ) -> Result<(AccountCode, AccountStorage), AccountError> {
         validate_components_support_account_type(&components, account_type)?;
 
-        let code = AccountCode::from_components_unchecked(&components)?;
+        let code = AccountCode::from_components_unchecked(&components, account_type)?;
         let storage = AccountStorage::from_components(components, account_type)?;
 
         Ok((code, storage))
@@ -893,6 +900,28 @@ mod tests {
                 component_index: 0
             }
         ))
+    }
+
+    /// Two components who export a procedure with the same MAST root should fail to convert into
+    /// code and storage.
+    #[test]
+    fn test_account_duplicate_exported_mast_root() {
+        let code1 = "export.foo add eq.1 end";
+        let code2 = "export.bar add eq.1 end";
+
+        let library1 = Assembler::default().assemble_library([code1]).unwrap();
+        let library2 = Assembler::default().assemble_library([code2]).unwrap();
+
+        let component1 = AccountComponent::new(library1, vec![]).unwrap().with_supports_all_types();
+        let component2 = AccountComponent::new(library2, vec![]).unwrap().with_supports_all_types();
+
+        let err = Account::initialize_from_components(
+            AccountType::RegularAccountUpdatableCode,
+            vec![NoopAuthComponent.into(), component1, component2],
+        )
+        .unwrap_err();
+
+        assert_matches!(err, AccountError::AccountComponentDuplicateProcedureRoot(_))
     }
 
     /// Tests all cases of account ID seed validation.

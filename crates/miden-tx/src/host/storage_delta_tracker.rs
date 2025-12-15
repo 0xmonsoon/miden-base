@@ -155,7 +155,8 @@ impl StorageDeltaTracker {
             // Keep only the values whose new value is different from the initial value.
             value_slots.retain(|slot_name, new_value| {
                 // SAFETY: The header in the initial storage is the one from the account against
-                // which the transaction is executed, so accessing that slot name should be fine.
+                // which the transaction is executed, so accessing that slot index
+                // should be fine.
                 let (_slot_type, initial_value) = storage_header
                     .find_slot_header_by_name(slot_name)
                     .expect("slot name should exist");
@@ -191,7 +192,7 @@ impl StorageDeltaTracker {
 
 /// Creates empty slots of the same slot types as the to-be-created account.
 fn empty_storage_header_from_account(account: &PartialAccount) -> AccountStorageHeader {
-    let slots: Vec<(StorageSlotName, StorageSlotType, Word)> = account
+    let mut slots: Vec<(StorageSlotName, StorageSlotType, Word)> = account
         .storage()
         .header()
         .slots()
@@ -201,7 +202,9 @@ fn empty_storage_header_from_account(account: &PartialAccount) -> AccountStorage
         })
         .collect();
 
-    // SAFETY: We are recreating a valid storage header with different values, which should not
-    // violate any constraints of the storage header.
+    slots.sort_by_key(|(slot_name, ..)| slot_name.id());
+
+    // SAFETY: We have sorted the slots and the max number of slots should not be exceeded as
+    // enforced by the storage header in partial storage.
     AccountStorageHeader::new(slots).expect("storage header should be valid")
 }

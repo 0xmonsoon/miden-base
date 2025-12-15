@@ -29,6 +29,12 @@ The component metadata describes the account component entirely: its name, descr
 
 The storage layout must specify a contiguous list of slot values that starts at index `0`, and can optionally specify initial values for each of the slots. Alternatively, placeholders can be utilized to identify values that should be provided at the moment of instantiation.
 
+### Storage schema
+
+Internally the component metadata holds an `AccountStorageSchema` that maps slot identifiers to `StorageSlotSchema` definitions. Each slot schema describes either a single-word value (`ValueSlotSchema`) or a storage map (`MapSlotSchema`). The value schema exposes a `SchemaType` for the word (defaulting to `word`, or any other registered `TemplateTypeIdentifier`), while the map schema tracks the schema types for both keys and values, allowing the metadata to communicate typing information separate from the actual entries.
+
+When serialized to TOML, this schema lives inside each `[[storage]]` table plus optional `key-type`/`value-type` metadata for maps. These fields survive the round-trip and are used when instantiating components to validate placeholder input.
+
 ### TOML specification
 
 The component metadata can be defined using TOML. Below is an example specification:
@@ -89,23 +95,11 @@ values = [
 
 #### Specifying values and their types
 
-In the TOML format, any value that is one word long can be written as a single value, or as exactly four field elements. In turn, a field element is a number within Miden's finite field.
+In the TOML format, single-slot entries can provide their value explicitly or declare one or more nested placeholders. Values that fit within one word may be expressed either as a single hexadecimal string or as exactly four field-element descriptions, where each field element can itself be a literal or a placeholder. Field elements (felts) are numbers in Miden's finite field and must be provided as strings (hexadecimal or decimal).
 
-A word can be written as a hexadecimal value, and field elements can be written either as hexadecimal or decimal numbers. In all cases, numbers should be input as strings.
+Each one-word slot is described by a `SchemaType`. The optional `type` field selects that schema type; it defaults to `word` but can be another registered `TemplateTypeIdentifier` such as `auth::rpo_falcon512::pub_key`. When a word is expressed via four felts, each felt may declare its own `type` (`u8`, `u16`, `u32`, `felt`, `token_symbol`, etc.), an optional `name`, and a description. Any placeholders within those felt descriptions must be populated at instantiation via [`InitStorageData`](#initializing-placeholder-values).
 
-In our example, the `token_metadata` single-slot entry is defined as four elements, where the first element is a placeholder, and the second, third and fourth are hardcoded values.
-
-##### Word types
-
-Valid word types are `word` (default type) and `auth::rpo_falcon512::pub_key` (represents a Falcon public key). Both can be written and interpreted as hexadecimal strings.
-
-##### Felt types
-
-Valid field element types are `u8`, `u16`, `u32`, `felt` (default type) and `token_symbol`:
-
-- `u8`, `u16` and `u32` values can be parsed as decimal numbers and represent 8-bit, 16-bit and 32-bit unsigned integers
-- `felt` values represent a field element, and can be parsed as decimal or hexadecimal values
-- `token_symbol` values represent the symbol for basic fungible tokens, and are parsed as strings made of four uppercase characters
+In our example, the `token_metadata` entry is a single-slot value defined through four field elements. The first element is a placeholder of type `felt`, while the remaining three are hardcoded constants.
 
 #### Header
 
@@ -155,6 +149,7 @@ Storage map entries can specify the following fields:
   whose contents must be provided at instantiation time through [`InitStorageData`](#initializing-placeholder-values).
   If `values` are present, the entry is interpreted as a static map regardless of the `type` field, so
   specifying `type = "map"` becomes purely descriptive in that case.
+- `key-type` / `value-type` (optional): Applies a schema type to every key or value stored in the map slot. `key-type` can be any schema type (defaults to `word`), while `value-type` can either be a single schema type or an array of four schema types describing composed words (for example, `value-type = ["u8", "u16", "u32", "felt"]`). These types are stored with the schema metadata and are used during validation and placeholder parsing.
 
 In the example, the third storage entry defines a static storage map with two initial entries, while
 the fourth entry (`procedure_thresholds`) is a templated map whose contents are supplied at

@@ -1,8 +1,9 @@
 use miden_objects::account::AccountCode;
 use miden_objects::assembly::Library;
+use miden_objects::assembly::diagnostics::NamedSource;
 use miden_objects::utils::sync::LazyLock;
 
-use crate::utils::CodeBuilder;
+use crate::transaction::TransactionKernel;
 
 const MOCK_FAUCET_CODE: &str = "
     use.miden::faucet
@@ -139,17 +140,19 @@ const MOCK_ACCOUNT_CODE: &str = "
 ";
 
 static MOCK_FAUCET_LIBRARY: LazyLock<Library> = LazyLock::new(|| {
-    CodeBuilder::default()
-        .compile_component_code("mock::faucet", MOCK_FAUCET_CODE)
+    let source = NamedSource::new("mock::faucet", MOCK_FAUCET_CODE);
+    TransactionKernel::assembler()
+        .with_debug_mode(cfg!(feature = "with-debug-info"))
+        .assemble_library([source])
         .expect("mock faucet code should be valid")
-        .into_library()
 });
 
 static MOCK_ACCOUNT_LIBRARY: LazyLock<Library> = LazyLock::new(|| {
-    CodeBuilder::default()
-        .compile_component_code("mock::account", MOCK_ACCOUNT_CODE)
+    let source = NamedSource::new("mock::account", MOCK_ACCOUNT_CODE);
+    TransactionKernel::assembler()
+        .with_debug_mode(cfg!(feature = "with-debug-info"))
+        .assemble_library([source])
         .expect("mock account code should be valid")
-        .into_library()
 });
 
 // MOCK ACCOUNT CODE EXT

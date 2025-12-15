@@ -1,12 +1,12 @@
 use alloc::collections::BTreeMap;
 
+use miden_core::utils::{ByteReader, ByteWriter, Deserializable, Serializable};
+
 use crate::account::AccountId;
-use crate::block::BlockHeader;
-use crate::block::account_tree::AccountWitness;
-use crate::block::nullifier_tree::NullifierWitness;
+use crate::block::{AccountWitness, BlockHeader, NullifierWitness};
 use crate::note::{NoteId, NoteInclusionProof, Nullifier};
 use crate::transaction::PartialBlockchain;
-use crate::utils::{ByteReader, ByteWriter, Deserializable, DeserializationError, Serializable};
+use crate::utils::serde::DeserializationError;
 
 // BLOCK INPUTS
 // ================================================================================================

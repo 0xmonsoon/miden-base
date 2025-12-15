@@ -1,33 +1,48 @@
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
 use miden_core::{Felt, Word};
+use semver::Version;
 use serde::de::value::MapAccessDeserializer;
 use serde::de::{self, Error, MapAccess, SeqAccess, Visitor};
-use serde::ser::{SerializeMap, SerializeStruct};
+use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use super::placeholder::TemplateType;
+use super::placeholder::TemplateTypeIdentifier;
 use super::{
-    FeltRepresentation,
+    AccountStorageSchema,
+    FeltSchema,
     InitStorageData,
-    MapEntry,
-    MapRepresentation,
-    MultiWordRepresentation,
-    StorageEntry,
+    MapEntrySchema,
+    MapSchema,
+    MapSlotSchema,
+    SchemaType,
+    StorageSlotSchema,
     StorageValueNameError,
-    WordRepresentation,
+    ValueSlotSchema,
+    WordSchema,
 };
-use crate::account::component::FieldIdentifier;
 use crate::account::component::template::storage::placeholder::{TEMPLATE_REGISTRY, TemplateFelt};
-use crate::account::{AccountComponentMetadata, StorageValueName};
+use crate::account::component::{AccountComponentMetadata, FieldIdentifier, StorageValueName};
+use crate::account::{AccountType, StorageSlotName};
 use crate::errors::AccountComponentTemplateError;
 
 // ACCOUNT COMPONENT METADATA TOML FROM/TO
 // ================================================================================================
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct RawAccountComponentMetadata {
+    name: String,
+    description: String,
+    version: Version,
+    supported_types: BTreeSet<AccountType>,
+    #[serde(rename = "storage")]
+    storage: Vec<RawStorageSlotSchema>,
+}
 
 impl AccountComponentMetadata {
     /// Deserializes `toml_string` and validates the resulting [AccountComponentMetadata]
@@ -35,15 +50,19 @@ impl AccountComponentMetadata {
     /// # Errors
     ///
     /// - If deserialization fails
-    /// - If the template specifies storage slots with duplicates.
-    /// - If the template includes slot numbers that do not start at zero.
-    /// - If storage slots in the template are not contiguous.
+    /// - If the schema specifies storage slots with duplicates.
+    /// - If the schema contains invalid slot definitions.
     pub fn from_toml(toml_string: &str) -> Result<Self, AccountComponentTemplateError> {
-        let component: AccountComponentMetadata = toml::from_str(toml_string)
+        let raw: RawAccountComponentMetadata = toml::from_str(toml_string)
             .map_err(AccountComponentTemplateError::TomlDeserializationError)?;
 
-        component.validate()?;
-        Ok(component)
+        let mut fields = Vec::with_capacity(raw.storage.len());
+        for slot in raw.storage {
+            fields.push(slot.into_slot_schema()?);
+        }
+
+        let storage_schema = AccountStorageSchema::new(fields)?;
+        Self::new(raw.name, raw.description, raw.version, raw.supported_types, storage_schema)
     }
 
     /// Serializes the account component template into a TOML string.
@@ -57,21 +76,21 @@ impl AccountComponentMetadata {
 // WORD REPRESENTATION SERIALIZATION
 // ================================================================================================
 
-impl Serialize for WordRepresentation {
+impl Serialize for WordSchema {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         match self {
-            WordRepresentation::Template { identifier, r#type } => {
-                let mut state = serializer.serialize_struct("WordRepresentation", 3)?;
+            WordSchema::Template { identifier, r#type } => {
+                let mut state = serializer.serialize_struct("WordSchema", 3)?;
                 state.serialize_field("name", &identifier.name())?;
                 state.serialize_field("description", &identifier.description())?;
                 state.serialize_field("type", r#type)?;
                 state.end()
             },
-            WordRepresentation::Value { identifier, value } => {
-                let mut state = serializer.serialize_struct("WordRepresentation", 3)?;
+            WordSchema::Value { identifier, value } => {
+                let mut state = serializer.serialize_struct("WordSchema", 3)?;
 
                 state.serialize_field("name", &identifier.as_ref().map(|id| id.name()))?;
                 state.serialize_field(
@@ -85,18 +104,18 @@ impl Serialize for WordRepresentation {
     }
 }
 
-impl<'de> Deserialize<'de> for WordRepresentation {
+impl<'de> Deserialize<'de> for WordSchema {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        struct WordRepresentationVisitor;
+        struct WordSchemaVisitor;
 
-        impl<'de> Visitor<'de> for WordRepresentationVisitor {
-            type Value = WordRepresentation;
+        impl<'de> Visitor<'de> for WordSchemaVisitor {
+            type Value = WordSchema;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("a string or a map representing a WordRepresentation")
+                formatter.write_str("a string or a map representing a WordSchema")
             }
 
             // A bare string is interpreted it as a Value variant.
@@ -125,7 +144,7 @@ impl<'de> Deserialize<'de> for WordRepresentation {
                 A: SeqAccess<'de>,
             {
                 // Deserialize as a list of felt representations
-                let elements: Vec<FeltRepresentation> =
+                let elements: Vec<FeltSchema> =
                     Deserialize::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))?;
                 if elements.len() != 4 {
                     return Err(Error::invalid_length(
@@ -133,9 +152,8 @@ impl<'de> Deserialize<'de> for WordRepresentation {
                         &"expected an array of 4 elements",
                     ));
                 }
-                let value: [FeltRepresentation; 4] =
-                    elements.try_into().expect("length was checked");
-                Ok(WordRepresentation::new_value(value, None))
+                let value: [FeltSchema; 4] = elements.try_into().expect("length was checked");
+                Ok(WordSchema::new_value(value, None))
             }
 
             fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
@@ -143,24 +161,23 @@ impl<'de> Deserialize<'de> for WordRepresentation {
                 M: MapAccess<'de>,
             {
                 #[derive(Deserialize, Debug)]
-                struct WordRepresentationHelper {
+                struct WordSchemaHelper {
                     name: Option<String>,
                     description: Option<String>,
-                    // The "value" field (if present) must be an array of 4 FeltRepresentations.
-                    value: Option<[FeltRepresentation; 4]>,
+                    // The "value" field (if present) must be an array of 4 FeltSchemas.
+                    value: Option<[FeltSchema; 4]>,
                     #[serde(rename = "type")]
-                    r#type: Option<TemplateType>,
+                    r#type: Option<TemplateTypeIdentifier>,
                 }
 
-                let helper =
-                    WordRepresentationHelper::deserialize(MapAccessDeserializer::new(map))?;
+                let helper = WordSchemaHelper::deserialize(MapAccessDeserializer::new(map))?;
 
                 if let Some(value) = helper.value {
                     let identifier = helper
                         .name
                         .map(|n| parse_field_identifier::<M::Error>(n, helper.description.clone()))
                         .transpose()?;
-                    Ok(WordRepresentation::Value { value, identifier })
+                    Ok(WordSchema::Value { value, identifier })
                 } else {
                     // Otherwise, we expect a Template variant (name is required for identification)
                     let identifier = expect_parse_field_identifier::<M::Error>(
@@ -168,31 +185,31 @@ impl<'de> Deserialize<'de> for WordRepresentation {
                         helper.description,
                         "word template",
                     )?;
-                    let r#type = helper.r#type.unwrap_or_else(TemplateType::native_word);
-                    Ok(WordRepresentation::Template { r#type, identifier })
+                    let r#type = helper.r#type.unwrap_or_else(TemplateTypeIdentifier::native_word);
+                    Ok(WordSchema::Template { r#type, identifier })
                 }
             }
         }
 
-        deserializer.deserialize_any(WordRepresentationVisitor)
+        deserializer.deserialize_any(WordSchemaVisitor)
     }
 }
 
 // FELT REPRESENTATION SERIALIZATION
 // ================================================================================================
 
-impl Serialize for FeltRepresentation {
+impl Serialize for FeltSchema {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         match self {
-            FeltRepresentation::Value { identifier, value } => {
+            FeltSchema::Value { identifier, value } => {
                 let hex = value.to_string();
                 if identifier.is_none() {
                     serializer.serialize_str(&hex)
                 } else {
-                    let mut state = serializer.serialize_struct("FeltRepresentation", 3)?;
+                    let mut state = serializer.serialize_struct("FeltSchema", 3)?;
                     if let Some(id) = identifier {
                         state.serialize_field("name", &id.name)?;
                         state.serialize_field("description", &id.description)?;
@@ -201,8 +218,8 @@ impl Serialize for FeltRepresentation {
                     state.end()
                 }
             },
-            FeltRepresentation::Template { identifier, r#type } => {
-                let mut state = serializer.serialize_struct("FeltRepresentation", 3)?;
+            FeltSchema::Template { identifier, r#type } => {
+                let mut state = serializer.serialize_struct("FeltSchema", 3)?;
                 state.serialize_field("name", &identifier.name)?;
                 state.serialize_field("description", &identifier.description)?;
                 state.serialize_field("type", r#type)?;
@@ -212,7 +229,7 @@ impl Serialize for FeltRepresentation {
     }
 }
 
-impl<'de> Deserialize<'de> for FeltRepresentation {
+impl<'de> Deserialize<'de> for FeltSchema {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -231,7 +248,7 @@ impl<'de> Deserialize<'de> for FeltRepresentation {
                 #[serde(default)]
                 value: Option<String>,
                 #[serde(rename = "type")]
-                r#type: Option<TemplateType>,
+                r#type: Option<TemplateTypeIdentifier>,
             },
             Scalar(String),
         }
@@ -241,11 +258,11 @@ impl<'de> Deserialize<'de> for FeltRepresentation {
             Intermediate::Scalar(s) => {
                 let felt = Felt::parse_felt(&s)
                     .map_err(|e| D::Error::custom(format!("failed to parse Felt: {e}")))?;
-                Ok(FeltRepresentation::Value { identifier: None, value: felt })
+                Ok(FeltSchema::Value { identifier: None, value: felt })
             },
             Intermediate::Map { name, description, value, r#type } => {
                 // Get the defined type, or the default if it was not specified
-                let felt_type = r#type.unwrap_or_else(TemplateType::native_felt);
+                let felt_type = r#type.unwrap_or_else(TemplateTypeIdentifier::native_felt);
                 if let Some(val_str) = value {
                     // Parse into felt from the input string
                     let felt =
@@ -255,7 +272,7 @@ impl<'de> Deserialize<'de> for FeltRepresentation {
                     let identifier = name
                         .map(|n| parse_field_identifier::<D::Error>(n, description.clone()))
                         .transpose()?;
-                    Ok(FeltRepresentation::Value { identifier, value: felt })
+                    Ok(FeltSchema::Value { identifier, value: felt })
                 } else {
                     // No value provided, so this is a placeholder
                     let identifier = expect_parse_field_identifier::<D::Error>(
@@ -263,188 +280,267 @@ impl<'de> Deserialize<'de> for FeltRepresentation {
                         description,
                         "map template",
                     )?;
-                    Ok(FeltRepresentation::Template { r#type: felt_type, identifier })
+                    Ok(FeltSchema::Template { r#type: felt_type, identifier })
                 }
             },
         }
     }
 }
 
-// STORAGE VALUES
+// ACCOUNT STORAGE SCHEMA SERIALIZATION
 // ================================================================================================
 
-/// Represents the type of values that can be found in a storage slot's `values` field.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(untagged)]
-enum StorageValues {
-    /// List of individual words (for multi-slot entries).
-    Words(Vec<[FeltRepresentation; 4]>),
-    /// List of key-value entries (for map storage slots).
-    MapEntries(Vec<MapEntry>),
-}
-
-// STORAGE ENTRY SERIALIZATION
-// ================================================================================================
-
-#[derive(Default, Debug, Deserialize, Serialize)]
-struct RawStorageEntry {
-    #[serde(flatten)]
-    identifier: Option<FieldIdentifier>,
-    slot: Option<u8>,
-    slots: Option<Vec<u8>>,
+struct RawStorageSlotSchema {
+    /// The name of the storage slot, in `StorageSlotName` format (e.g.
+    /// `my_project::module::slot`).
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    /// Slot type.
+    ///
+    /// - If `type = "map"`, this is a map slot.
+    /// - Otherwise, if `type` is set and `value` is not, this is a templated word slot.
     #[serde(rename = "type")]
-    word_type: Option<TemplateType>,
-    value: Option<[FeltRepresentation; 4]>,
-    values: Option<StorageValues>,
+    #[serde(default)]
+    r#type: Option<TemplateTypeIdentifier>,
+    /// Word slot value representation (can contain nested templates).
+    #[serde(default)]
+    value: Option<WordSchema>,
+    /// Map slot entries (can contain templates).
+    #[serde(default)]
+    values: Option<Vec<MapEntrySchema>>,
+    #[serde(rename = "key-type")]
+    #[serde(default)]
+    key_type: Option<RawSchemaType>,
+    #[serde(rename = "value-type")]
+    #[serde(default)]
+    value_type: Option<RawSchemaType>,
 }
 
-impl From<StorageEntry> for RawStorageEntry {
-    fn from(entry: StorageEntry) -> Self {
-        match entry {
-            StorageEntry::Value { slot, word_entry } => match word_entry {
-                WordRepresentation::Value { identifier, value } => RawStorageEntry {
-                    slot: Some(slot),
-                    identifier,
-                    value: Some(value),
-                    ..Default::default()
-                },
-                WordRepresentation::Template { identifier, r#type } => RawStorageEntry {
-                    slot: Some(slot),
-                    identifier: Some(identifier),
-                    word_type: Some(r#type),
-                    ..Default::default()
-                },
-            },
-            StorageEntry::Map { slot, map } => match map {
-                MapRepresentation::Value { identifier, entries } => RawStorageEntry {
-                    slot: Some(slot),
-                    identifier: Some(FieldIdentifier {
-                        name: identifier.name,
-                        description: identifier.description,
-                    }),
-                    values: Some(StorageValues::MapEntries(entries)),
-                    ..Default::default()
-                },
-                MapRepresentation::Template { identifier } => RawStorageEntry {
-                    slot: Some(slot),
-                    identifier: Some(FieldIdentifier {
-                        name: identifier.name,
-                        description: identifier.description,
-                    }),
-                    word_type: Some(TemplateType::storage_map()),
-                    ..Default::default()
-                },
-            },
-            StorageEntry::MultiSlot { slots, word_entries } => match word_entries {
-                MultiWordRepresentation::Value { identifier, values } => RawStorageEntry {
-                    slot: None,
-                    identifier: Some(identifier),
-                    slots: Some(slots.collect()),
-                    values: Some(StorageValues::Words(values)),
-                    ..Default::default()
-                },
-            },
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+enum RawSchemaType {
+    Word(TemplateTypeIdentifier),
+    Felts([TemplateTypeIdentifier; 4]),
+}
+
+impl From<SchemaType> for RawSchemaType {
+    fn from(schema_type: SchemaType) -> Self {
+        match schema_type {
+            SchemaType::Word(id) => RawSchemaType::Word(id),
+            SchemaType::Felts(ids) => RawSchemaType::Felts(ids),
         }
     }
 }
 
-impl Serialize for StorageEntry {
+impl From<RawSchemaType> for SchemaType {
+    fn from(raw: RawSchemaType) -> Self {
+        match raw {
+            RawSchemaType::Word(id) => SchemaType::Word(id),
+            RawSchemaType::Felts(ids) => SchemaType::Felts(ids),
+        }
+    }
+}
+
+impl RawStorageSlotSchema {
+    fn from_slot(slot_name: &StorageSlotName, schema: &StorageSlotSchema) -> Self {
+        match schema {
+            StorageSlotSchema::Value(slot) => {
+                let word = slot.word();
+                let (r#type, value) = match word {
+                    WordSchema::Template { identifier, r#type }
+                        if identifier.name.as_str().is_empty() =>
+                    {
+                        (Some(r#type.clone()), None)
+                    },
+                    other => (None, Some(other.clone())),
+                };
+
+                Self {
+                    name: slot_name.as_str().to_string(),
+                    description: slot.description().cloned(),
+                    r#type,
+                    value,
+                    values: None,
+                    key_type: None,
+                    value_type: None,
+                }
+            },
+            StorageSlotSchema::Map(slot) => {
+                let map = slot.map();
+                let (r#type, values) = match map {
+                    MapSchema::Template { .. } => {
+                        (Some(TemplateTypeIdentifier::storage_map()), None)
+                    },
+                    MapSchema::Value { entries, .. } => {
+                        (Some(TemplateTypeIdentifier::storage_map()), Some(entries.clone()))
+                    },
+                };
+
+                Self {
+                    name: slot_name.as_str().to_string(),
+                    description: slot.description().cloned(),
+                    r#type,
+                    value: None,
+                    values,
+                    key_type: Some(RawSchemaType::from(slot.key_type().clone())),
+                    value_type: Some(RawSchemaType::from(slot.value_type().clone())),
+                }
+            },
+        }
+    }
+
+    fn into_slot_schema(
+        self,
+    ) -> Result<(StorageSlotName, StorageSlotSchema), AccountComponentTemplateError> {
+        let RawStorageSlotSchema {
+            name,
+            description,
+            r#type,
+            value,
+            values,
+            key_type,
+            value_type,
+        } = self;
+
+        let slot_name_raw = name;
+        let slot_name = StorageSlotName::new(slot_name_raw.clone()).map_err(|err| {
+            AccountComponentTemplateError::InvalidSchema(format!(
+                "invalid storage slot name `{slot_name_raw}`: {err}"
+            ))
+        })?;
+
+        let description =
+            description.and_then(|d| if d.trim().is_empty() { None } else { Some(d) });
+
+        if value.is_some() && values.is_some() {
+            return Err(AccountComponentTemplateError::InvalidSchema(
+                "storage slot schema cannot define both `value` (word slot) and `values` (map slot)"
+                    .into(),
+            ));
+        }
+
+        let slot_prefix = super::slot_name_to_placeholder_prefix(&slot_name);
+        let key_type = key_type.map(Into::into);
+        let value_type = value_type.map(Into::into);
+
+        match (r#type, value, values) {
+            // Map slot with statically-defined entries (which may contain templates).
+            (maybe_type, None, Some(entries)) => {
+                if let Some(r#type) = maybe_type.clone()
+                    && r#type != TemplateTypeIdentifier::storage_map()
+                {
+                    return Err(AccountComponentTemplateError::InvalidSchema(
+                        "map storage slots with `values` must have `type = \"map\"`".into(),
+                    ));
+                }
+
+                let identifier = FieldIdentifier {
+                    name: slot_prefix.clone(),
+                    description: description.clone(),
+                };
+
+                Ok((
+                    slot_name,
+                    StorageSlotSchema::Map(MapSlotSchema::new(
+                        description.clone(),
+                        MapSchema::Value { identifier, entries },
+                        key_type.clone(),
+                        value_type.clone(),
+                    )),
+                ))
+            },
+
+            // Map slot whose contents are provided at instantiation time.
+            (Some(r#type), None, None) if r#type == TemplateTypeIdentifier::storage_map() => {
+                let identifier = FieldIdentifier {
+                    name: slot_prefix.clone(),
+                    description: description.clone(),
+                };
+
+                Ok((
+                    slot_name,
+                    StorageSlotSchema::Map(MapSlotSchema::new(
+                        description.clone(),
+                        MapSchema::Template { identifier },
+                        key_type.clone(),
+                        value_type.clone(),
+                    )),
+                ))
+            },
+
+            // Word slot with explicit value representation (which may contain nested templates).
+            (None, Some(value), None) => Ok((
+                slot_name,
+                StorageSlotSchema::Value(ValueSlotSchema::new(description.clone(), value)),
+            )),
+
+            // Templated word slot; placeholder key is derived from slot name.
+            (Some(r#type), None, None) => {
+                let identifier = FieldIdentifier {
+                    name: StorageValueName::empty(),
+                    description: description.clone(),
+                };
+
+                Ok((
+                    slot_name,
+                    StorageSlotSchema::Value(ValueSlotSchema::new(
+                        description,
+                        WordSchema::Template { identifier, r#type },
+                    )),
+                ))
+            },
+
+            (None, None, None) => Err(AccountComponentTemplateError::InvalidSchema(
+                "storage slot schema must define either `value`, `values`, or `type`".into(),
+            )),
+
+            (Some(_), Some(_), _) => Err(AccountComponentTemplateError::InvalidSchema(
+                "storage slot schema cannot define both `value` and `type`".into(),
+            )),
+
+            (None, _, Some(_)) => Err(AccountComponentTemplateError::InvalidSchema(
+                "storage slot schema cannot define `values` without `type = \"map\"`".into(),
+            )),
+        }
+    }
+
+    fn try_into_slot_schema<E>(self) -> Result<(StorageSlotName, StorageSlotSchema), E>
+    where
+        E: serde::de::Error,
+    {
+        self.into_slot_schema().map_err(|err| E::custom(err.to_string()))
+    }
+}
+
+impl Serialize for AccountStorageSchema {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let raw_storage_entry: RawStorageEntry = self.clone().into();
-        raw_storage_entry.serialize(serializer)
+        let mut seq = serializer.serialize_seq(Some(self.fields().len()))?;
+        for (slot_name, schema) in self.fields().iter() {
+            seq.serialize_element(&RawStorageSlotSchema::from_slot(slot_name, schema))?;
+        }
+        seq.end()
     }
 }
 
-impl<'de> Deserialize<'de> for StorageEntry {
-    fn deserialize<D>(deserializer: D) -> Result<StorageEntry, D::Error>
+impl<'de> Deserialize<'de> for AccountStorageSchema {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let raw = RawStorageEntry::deserialize(deserializer)?;
+        let raw_schemas = Vec::<RawStorageSlotSchema>::deserialize(deserializer)?;
+        let mut fields = Vec::with_capacity(raw_schemas.len());
 
-        if let Some(word_entry) = raw.value {
-            // If a value was provided, this is a WordRepresentation::Value entry
-            let slot = raw.slot.ok_or_else(|| missing_field_for("slot", "value entry"))?;
-            let identifier = raw.identifier;
-            Ok(StorageEntry::Value {
-                slot,
-                word_entry: WordRepresentation::Value { value: word_entry, identifier },
-            })
-        } else if let Some(StorageValues::MapEntries(map_entries)) = raw.values {
-            // If `values` field contains key/value pairs, deserialize as map
-            let identifier =
-                raw.identifier.ok_or_else(|| missing_field_for("identifier", "map entry"))?;
-            let name = identifier.name;
-            let slot = raw.slot.ok_or_else(|| missing_field_for("slot", "map entry"))?;
-            if let Some(word_type) = raw.word_type.clone()
-                && word_type != TemplateType::storage_map()
-            {
-                return Err(D::Error::custom(
-                    "map storage entries with `values` must have `type = \"map\"`",
-                ));
-            }
-            let mut map = MapRepresentation::new_value(map_entries, name);
-            if let Some(desc) = identifier.description {
-                map = map.with_description(desc);
-            }
-            Ok(StorageEntry::Map { slot, map })
-        } else if let Some(word_type) = raw.word_type.clone()
-            && word_type == TemplateType::storage_map()
-        {
-            let identifier =
-                raw.identifier.ok_or_else(|| missing_field_for("identifier", "map entry"))?;
-            let slot = raw.slot.ok_or_else(|| missing_field_for("slot", "map entry"))?;
-            let FieldIdentifier { name, description } = identifier;
-
-            // If values is specified (even if empty), create a value map.
-            // Due to #[serde(untagged)] on StorageValues, values = [] gets deserialized
-            // as StorageValues::Words(vec![]), so we need to treat it as an empty map.
-            // Otherwise, create a template map.
-            let mut map = if raw.values.is_some() {
-                MapRepresentation::new_value(Vec::new(), name)
-            } else {
-                MapRepresentation::new_template(name)
-            };
-
-            if let Some(desc) = description {
-                map = map.with_description(desc);
-            }
-            Ok(StorageEntry::Map { slot, map })
-        } else if let Some(StorageValues::Words(values)) = raw.values {
-            let identifier = raw
-                .identifier
-                .ok_or_else(|| missing_field_for("identifier", "multislot entry"))?;
-
-            let mut slots =
-                raw.slots.ok_or_else(|| missing_field_for("slots", "multislot entry"))?;
-
-            // Sort so we can check contiguity
-            slots.sort_unstable();
-            for pair in slots.windows(2) {
-                if pair[1] != pair[0] + 1 {
-                    return Err(serde::de::Error::custom(format!(
-                        "`slots` in the `{}` storage entry are not contiguous",
-                        identifier.name
-                    )));
-                }
-            }
-            let start = slots[0];
-            let end = slots.last().expect("checked validity") + 1;
-            Ok(StorageEntry::new_multislot(identifier, start..end, values))
-        } else if let Some(word_type) = raw.word_type {
-            // If a type was provided instead, this is a WordRepresentation::Template entry
-            let slot = raw.slot.ok_or_else(|| missing_field_for("slot", "single-slot entry"))?;
-            let identifier = raw
-                .identifier
-                .ok_or_else(|| missing_field_for("identifier", "single-slot entry"))?;
-            let word_entry = WordRepresentation::Template { r#type: word_type, identifier };
-            Ok(StorageEntry::Value { slot, word_entry })
-        } else {
-            Err(D::Error::custom("placeholder storage entries require the `type` field"))
+        for raw in raw_schemas {
+            let (slot_name, schema) = raw.try_into_slot_schema::<D::Error>()?;
+            fields.push((slot_name, schema));
         }
+
+        AccountStorageSchema::new(fields).map_err(D::Error::custom)
     }
 }
 
@@ -550,7 +646,7 @@ pub enum InitStorageDataError {
     InvalidStorageValueName(#[source] StorageValueNameError),
 
     #[error("invalid map entry: {0}")]
-    InvalidMapEntry(String),
+    InvalidMapEntrySchema(String),
 }
 
 impl Serialize for FieldIdentifier {
@@ -646,14 +742,14 @@ fn parse_field_identifier<E: serde::de::Error>(
 /// Parses a `{ key, value }` TOML table into a `(Word, Word)` pair, rejecting templates.
 fn parse_map_entry_value(item: toml::Value) -> Result<(Word, Word), InitStorageDataError> {
     // Try to deserialize the user input as a map entry
-    let entry: MapEntry = MapEntry::deserialize(item)
-        .map_err(|err| InitStorageDataError::InvalidMapEntry(err.to_string()))?;
+    let entry: MapEntrySchema = MapEntrySchema::deserialize(item)
+        .map_err(|err| InitStorageDataError::InvalidMapEntrySchema(err.to_string()))?;
 
     // Make sure the entry does not contain templates, only static
     if entry.key().template_requirements(StorageValueName::empty()).next().is_some()
         || entry.value().template_requirements(StorageValueName::empty()).next().is_some()
     {
-        return Err(InitStorageDataError::InvalidMapEntry(
+        return Err(InitStorageDataError::InvalidMapEntrySchema(
             "map entries cannot contain templates".into(),
         ));
     }
@@ -662,11 +758,11 @@ fn parse_map_entry_value(item: toml::Value) -> Result<(Word, Word), InitStorageD
     let key = entry
         .key()
         .try_build_word(&InitStorageData::default(), StorageValueName::empty())
-        .map_err(|err| InitStorageDataError::InvalidMapEntry(err.to_string()))?;
+        .map_err(|err| InitStorageDataError::InvalidMapEntrySchema(err.to_string()))?;
     let value = entry
         .value()
         .try_build_word(&InitStorageData::default(), StorageValueName::empty())
-        .map_err(|err| InitStorageDataError::InvalidMapEntry(err.to_string()))?;
+        .map_err(|err| InitStorageDataError::InvalidMapEntrySchema(err.to_string()))?;
 
     Ok((key, value))
 }
@@ -680,6 +776,7 @@ mod tests {
     use core::error::Error;
 
     use super::*;
+    use crate::account::AccountStorage;
     use crate::account::component::toml::InitStorageDataError;
 
     #[test]
@@ -785,5 +882,196 @@ mod tests {
         // TOML does not support duplicate keys
         assert_matches::assert_matches!(result, InitStorageDataError::InvalidToml(_));
         assert!(result.source().unwrap().to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn metadata_from_toml_parses_named_storage_schema() {
+        let toml_str = r#"
+            name = "test component"
+            description = "test description"
+            version = "0.1.0"
+            supported-types = []
+
+            [[storage]]
+            name = "demo::test_value"
+            description = "a demo slot"
+            type = "word"
+
+            [[storage]]
+            name = "demo::my_map"
+            type = "map"
+            values = [
+                { key = "0x0000000000000000000000000000000000000000000000000000000000000001", value = { name = "val" } },
+            ]
+        "#;
+
+        let metadata = AccountComponentMetadata::from_toml(toml_str).unwrap();
+        let requirements = metadata.get_placeholder_requirements();
+
+        assert!(requirements.contains_key(&StorageValueName::new("demo.test_value").unwrap()));
+        assert!(requirements.contains_key(&StorageValueName::new("demo.my_map.val").unwrap()));
+    }
+
+    #[test]
+    fn metadata_from_toml_rejects_reserved_slot_names() {
+        let reserved_slot = AccountStorage::faucet_metadata_slot().as_str();
+
+        let toml_str = format!(
+            r#"
+                name = "test component"
+                description = "test description"
+                version = "0.1.0"
+                supported-types = []
+
+                [[storage]]
+                name = "{reserved_slot}"
+                type = "word"
+            "#
+        );
+
+        assert_matches::assert_matches!(
+            AccountComponentMetadata::from_toml(&toml_str),
+            Err(AccountComponentTemplateError::ReservedSlotName(_))
+        );
+    }
+
+    #[test]
+    fn metadata_toml_round_trip_value_and_map_slots() {
+        let toml_str = r#"
+            name = "round trip"
+            description = "test round-trip"
+            version = "0.1.0"
+            supported-types = []
+
+            [[storage]]
+            name = "demo::scalar"
+            description = "single word slot"
+            value = "0x1"
+
+            [[storage]]
+            name = "demo::statemap"
+            type = "map"
+            values = [
+                { key = "0x000000000000ed5d", value = "0x10" },
+            ]
+        "#;
+
+        let original =
+            AccountComponentMetadata::from_toml(toml_str).expect("original metadata should parse");
+        let round_trip_toml = original.to_toml().expect("serialize to toml");
+        let round_trip =
+            AccountComponentMetadata::from_toml(&round_trip_toml).expect("round-trip parse");
+
+        assert_eq!(original, round_trip);
+    }
+
+    #[test]
+    fn metadata_toml_round_trip_typed_slots() {
+        let toml_str = r#"
+            name = "typed components"
+            description = "test typed slots"
+            version = "0.1.0"
+            supported-types = []
+
+            [[storage]]
+            name = "demo::typed_value"
+            type = "word"
+
+            [[storage]]
+            name = "demo::typed_map"
+            type = "map"
+            key-type = "word"
+            value-type = ["u8", "u16", "u32", "felt"]
+            values = [
+                { key = { name = "key_word", type = "word" }, value = { name = "value_word", type = "word" } },
+            ]
+        "#;
+
+        let metadata =
+            AccountComponentMetadata::from_toml(toml_str).expect("typed metadata should parse");
+        let schema = metadata.storage_schema();
+
+        let value_slot = schema
+            .fields()
+            .get(&StorageSlotName::new("demo::typed_value").unwrap())
+            .expect("value slot missing");
+        let value_slot = match value_slot {
+            StorageSlotSchema::Value(slot) => slot,
+            _ => panic!("expected value slot"),
+        };
+
+        let typed_value = TemplateTypeIdentifier::native_word();
+        assert_eq!(value_slot.schema_type(), SchemaType::Word(typed_value.clone()));
+
+        let map_slot = schema
+            .fields()
+            .get(&StorageSlotName::new("demo::typed_map").unwrap())
+            .expect("map slot missing");
+        let map_slot = match map_slot {
+            StorageSlotSchema::Map(slot) => slot,
+            _ => panic!("expected map slot"),
+        };
+
+        assert_eq!(map_slot.key_type(), &SchemaType::Word(TemplateTypeIdentifier::native_word()));
+        assert_eq!(
+            map_slot.value_type(),
+            &SchemaType::Felts([
+                TemplateTypeIdentifier::new("u8").unwrap(),
+                TemplateTypeIdentifier::new("u16").unwrap(),
+                TemplateTypeIdentifier::new("u32").unwrap(),
+                TemplateTypeIdentifier::new("felt").unwrap(),
+            ])
+        );
+
+        let mut requirements = metadata.get_placeholder_requirements();
+        assert_eq!(
+            requirements
+                .remove(&StorageValueName::new("demo.typed_value").unwrap())
+                .unwrap()
+                .r#type,
+            typed_value
+        );
+        assert_eq!(
+            requirements
+                .remove(&StorageValueName::new("demo.typed_map.key_word").unwrap())
+                .unwrap()
+                .r#type,
+            TemplateTypeIdentifier::native_word()
+        );
+        assert_eq!(
+            requirements
+                .remove(&StorageValueName::new("demo.typed_map.value_word").unwrap())
+                .unwrap()
+                .r#type,
+            TemplateTypeIdentifier::native_word()
+        );
+
+        let round_trip = metadata.to_toml().expect("serialize");
+        let parsed: toml::Value = toml::from_str(&round_trip).unwrap();
+        let storage = parsed.get("storage").unwrap().as_array().unwrap();
+
+        let typed_value_entry = storage
+            .iter()
+            .find(|entry| entry.get("name").unwrap().as_str().unwrap() == "demo::typed_value")
+            .unwrap();
+        assert_eq!(typed_value_entry.get("type").unwrap().as_str().unwrap(), "word");
+
+        let typed_map_entry = storage
+            .iter()
+            .find(|entry| entry.get("name").unwrap().as_str().unwrap() == "demo::typed_map")
+            .unwrap();
+        assert_eq!(typed_map_entry.get("type").unwrap().as_str().unwrap(), "map");
+        assert_eq!(typed_map_entry.get("key-type").unwrap().as_str().unwrap(), "word");
+        let values = typed_map_entry.get("values").unwrap().as_array().unwrap();
+        let value_type = typed_map_entry.get("value-type").unwrap().as_array().unwrap();
+        assert_eq!(
+            value_type.iter().map(|value| value.as_str().unwrap()).collect::<Vec<_>>(),
+            vec!["u8", "u16", "u32", "felt"]
+        );
+        let first = values.get(0).unwrap().as_table().unwrap();
+        let key = first.get("key").unwrap().as_table().unwrap();
+        assert_eq!(key.get("type").unwrap().as_str().unwrap(), "word");
+        let value = first.get("value").unwrap().as_table().unwrap();
+        assert_eq!(value.get("type").unwrap().as_str().unwrap(), "word");
     }
 }

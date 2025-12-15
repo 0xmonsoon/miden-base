@@ -1,6 +1,6 @@
 use std::vec::Vec;
 
-use miden_lib::utils::CodeBuilder;
+use miden_lib::utils::ScriptBuilder;
 use miden_objects::account::AccountId;
 use miden_objects::batch::ProvenBatch;
 use miden_objects::block::BlockNumber;
@@ -110,5 +110,5 @@ fn update_expiration_tx_script(expiration_delta: u16) -> TransactionScript {
         "
     );
 
-    CodeBuilder::default().compile_tx_script(code).unwrap()
+    ScriptBuilder::default().compile_tx_script(code).unwrap()
 }

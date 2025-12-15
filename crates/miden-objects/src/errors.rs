@@ -17,6 +17,7 @@ use super::asset::{FungibleAsset, NonFungibleAsset, TokenSymbol};
 use super::crypto::merkle::MerkleError;
 use super::note::NoteId;
 use super::{MAX_BATCHES_PER_BLOCK, MAX_OUTPUT_NOTES_PER_BATCH, Word};
+use crate::account::component::{StorageValueName, StorageValueNameError, TemplateTypeError};
 use crate::account::{
     AccountCode,
     AccountIdPrefix,
@@ -46,35 +47,30 @@ use crate::{
 // ACCOUNT COMPONENT TEMPLATE ERROR
 // ================================================================================================
 
-/*
 #[derive(Debug, Error)]
 pub enum AccountComponentTemplateError {
     #[error("storage slot name `{0}` is duplicate")]
-    DuplicateEntryNames(StorageValueName),
+    DuplicateSlotName(StorageSlotName),
     #[error("storage placeholder name `{0}` is duplicate")]
     DuplicatePlaceholderName(StorageValueName),
-    #[error("slot {0} is defined multiple times")]
-    DuplicateSlot(u8),
     #[error("storage value name is incorrect: {0}")]
     IncorrectStorageValueName(#[source] StorageValueNameError),
+    #[error("invalid storage schema: {0}")]
+    InvalidSchema(String),
     #[error("type `{0}` is not valid for `{1}` slots")]
     InvalidType(String, String),
     #[error("error deserializing component metadata: {0}")]
     MetadataDeserializationError(String),
-    #[error("multi-slot entry should contain as many values as storage slot indices")]
-    MultiSlotArityMismatch,
-    #[error("multi-slot entry slot range should occupy more than one storage slot")]
-    MultiSlotSpansOneSlot,
-    #[error("component storage slots are not contiguous ({0} is followed by {1})")]
-    NonContiguousSlots(u8, u8),
     #[error("storage value for placeholder `{0}` was not provided in the init storage data")]
     PlaceholderValueNotProvided(StorageValueName),
+    #[error(
+        "account component storage schema cannot contain a slot with name `{0}` as it is reserved by the protocol"
+    )]
+    ReservedSlotName(StorageSlotName),
     #[error("error converting value into expected type: ")]
     StorageValueParsingError(#[source] TemplateTypeError),
     #[error("storage map contains duplicate keys")]
     StorageMapHasDuplicateKeys(#[source] Box<dyn Error + Send + Sync + 'static>),
-    #[error("component storage slots have to start at 0, but they start at {0}")]
-    StorageSlotsDoNotStartAtZero(u8),
     #[cfg(feature = "std")]
     #[error("error trying to deserialize from toml")]
     TomlDeserializationError(#[source] toml::de::Error),
@@ -82,7 +78,6 @@ pub enum AccountComponentTemplateError {
     #[error("error trying to deserialize from toml")]
     TomlSerializationError(#[source] toml::ser::Error),
 }
-*/
 
 // ACCOUNT ERROR
 // ================================================================================================
@@ -99,10 +94,18 @@ pub enum AccountError {
     AccountCodeNoProcedures,
     #[error("account code contains {0} procedures but it may contain at most {max} procedures", max = AccountCode::MAX_NUM_PROCEDURES)]
     AccountCodeTooManyProcedures(usize),
+    #[error("account procedure {0}'s storage offset {1} does not fit into u8")]
+    AccountCodeProcedureStorageOffsetTooLarge(Word, Felt),
+    #[error("account procedure {0}'s storage size {1} does not fit into u8")]
+    AccountCodeProcedureStorageSizeTooLarge(Word, Felt),
+    #[error("account procedure {0}'s final two elements must be Felt::ZERO")]
+    AccountCodeProcedureInvalidPadding(Word),
     #[error("failed to assemble account component:\n{}", PrintDiagnostic::new(.0))]
     AccountComponentAssemblyError(Report),
     #[error("failed to merge components into one account code mast forest")]
     AccountComponentMastForestMergeError(#[source] MastForestError),
+    #[error("procedure with MAST root {0} is present in multiple account components")]
+    AccountComponentDuplicateProcedureRoot(Word),
     // #[error("failed to create account component")]
     // AccountComponentTemplateInstantiationError(#[source] AccountComponentTemplateError),
     #[error("account component contains multiple authentication procedures")]
@@ -147,9 +150,9 @@ pub enum AccountError {
     DuplicateStorageSlotName(StorageSlotName),
     #[error(
         "account storage cannot contain a user-provided slot with name {} as it is reserved by the protocol",
-        AccountStorage::faucet_sysdata_slot()
+        AccountStorage::faucet_metadata_slot()
     )]
-    StorageSlotNameMustNotBeFaucetSysdata,
+    StorageSlotNameMustNotBeFaucetMetadata,
     #[error("storage does not contain a slot with name {slot_name}")]
     StorageSlotNameNotFound { slot_name: StorageSlotName },
     #[error("storage does not contain a slot with ID {slot_id}")]
@@ -158,6 +161,14 @@ pub enum AccountError {
     UnsortedStorageSlots,
     #[error("number of storage slots is {0} but max possible number is {max}", max = AccountStorage::MAX_NUM_STORAGE_SLOTS)]
     StorageTooManySlots(u64),
+    #[error("procedure storage offset + size is {0} which exceeds the maximum value of {max}",
+      max = AccountStorage::MAX_NUM_STORAGE_SLOTS
+    )]
+    StorageOffsetPlusSizeOutOfBounds(u16),
+    #[error(
+        "procedure which does not access storage (storage size = 0) has non-zero storage offset"
+    )]
+    PureProcedureWithStorageOffset,
     #[error(
         "account component at index {component_index} is incompatible with account of type {account_type}"
     )]
@@ -479,8 +490,8 @@ pub enum TokenSymbolError {
     ValueTooLarge(u64),
     #[error("token symbol should have length between 1 and 6 characters, but {0} was provided")]
     InvalidLength(usize),
-    #[error("token symbol contains a character that is not uppercase ASCII")]
-    InvalidCharacter,
+    #[error("token symbol `{0}` contains characters that are not uppercase ASCII")]
+    InvalidCharacter(String),
     #[error("token symbol data left after decoding the specified number of characters")]
     DataNotFullyDecoded,
 }
@@ -1081,9 +1092,6 @@ pub enum NullifierTreeError {
 
     #[error("failed to compute nullifier tree mutations")]
     ComputeMutations(#[source] MerkleError),
-
-    #[error("invalid nullifier block number")]
-    InvalidNullifierBlockNumber(Word),
 }
 
 // AUTH SCHEME ERROR
