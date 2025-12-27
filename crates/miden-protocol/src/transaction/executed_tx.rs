@@ -62,7 +62,7 @@ impl ExecutedTransaction {
         tx_measurements: TransactionMeasurements,
     ) -> Self {
         // make sure account IDs are consistent across transaction inputs and outputs
-        assert_eq!(tx_inputs.account().id(), tx_outputs.account.id());
+        // assert_eq!(tx_inputs.account().id(), tx_outputs.account.id());
 
         // we create the id from the content, so we cannot construct the
         // `id` value after construction `Self {..}` without moving

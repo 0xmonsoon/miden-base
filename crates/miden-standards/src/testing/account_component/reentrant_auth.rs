@@ -4,13 +4,14 @@ use alloc::string::String;
 
 use miden_protocol::Word;
 use miden_protocol::account::{
-    AccountComponent,
-    AccountComponentCode,
-    StorageSlot,
-    StorageSlotName,
+    Account, AccountBuilder, AccountComponent, AccountComponentCode, AccountId, AccountStorageMode,
+    StorageSlot, StorageSlotName,
 };
+use miden_protocol::asset::{Asset, FungibleAsset};
+use miden_protocol::testing::account_id::ACCOUNT_ID_NATIVE_ASSET_FAUCET;
 use miden_protocol::utils::sync::LazyLock;
 
+use super::{IncrNonceAuthComponent, MockAccountComponent};
 use crate::code_builder::CodeBuilder;
 
 /// The storage slot name for the call counter in the self-calling auth component.
@@ -128,6 +129,85 @@ impl From<SelfCallingAuthComponent> for AccountComponent {
         let counter_slot = StorageSlot::with_value(counter_slot_name, Word::default());
 
         AccountComponent::new(SELF_CALLING_AUTH_LIBRARY.clone(), vec![counter_slot])
+            .expect("component should be valid")
+            .with_supports_all_types()
+    }
+}
+
+static FOREIGN_ACCOUNT: LazyLock<Account> = LazyLock::new(|| {
+    let native_asset_id = AccountId::try_from(ACCOUNT_ID_NATIVE_ASSET_FAUCET).unwrap();
+    let native_asset = FungibleAsset::new(native_asset_id, 10000).unwrap();
+
+    AccountBuilder::new([12; 32])
+        .with_auth_component(IncrNonceAuthComponent)
+        .with_component(MockAccountComponent::with_empty_slots())
+        .storage_mode(AccountStorageMode::Public)
+        .with_assets(vec![Asset::Fungible(native_asset)])
+        .build_existing()
+        .unwrap()
+});
+
+static FEE_DEDUCTION_FROM_FOREIGN_ACCOUNT_CODE: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        r#"
+        use miden::protocol::native_account
+        use miden::protocol::active_account
+        use miden::core::sys
+        use miden::protocol::tx
+        use miden::protocol::kernel_proc_offsets
+        use miden::protocol::output_note
+
+        const CALL_COUNTER_SLOT = word("{CALL_COUNTER_SLOT_NAME}")
+
+        pub proc auth_self_call
+            # => [AUTH_ARGS]
+            dropw
+
+            # increasing nonce
+            exec.native_account::incr_nonce drop
+
+            # preparing stack to switch context
+            padw padw padw
+            # => [pad(12)]
+
+            push.0
+            # => [pad(13)]
+
+            push.{foreign_account_id_prefix} push.{foreign_account_id_suffix}
+            # => [foreign_account_id_suffix, foreign_account_id_prefix, pad(13)]
+
+            exec.kernel_proc_offsets::tx_start_foreign_context_offset
+            # => [offset, foreign_account_id_suffix, foreign_account_id_prefix, pad(13)]
+
+            syscall.exec_kernel_proc
+            exec.sys::truncate_stack
+        end
+    "#,
+    foreign_account_id_suffix = FOREIGN_ACCOUNT.id().prefix().as_felt(),
+    foreign_account_id_prefix = FOREIGN_ACCOUNT.id().suffix(),
+  )
+});
+
+static FEE_DEDUCTION_FROM_FOREIGN_ACCOUNT_CODE_LIBRARY: LazyLock<AccountComponentCode> = LazyLock::new(|| {
+    CodeBuilder::default()
+        .compile_component_code("mock::fee_deduction_from_foreign_account", FEE_DEDUCTION_FROM_FOREIGN_ACCOUNT_CODE.as_str())
+        .expect("fee deduction from foreign account should be valid")
+});
+
+/// An auth component that attempts to call itself recursively.
+///
+/// This is designed to test whether the kernel properly prevents reentrancy
+/// when an auth procedure tries to invoke itself during execution.
+pub struct FeeFromForeignAccountComponent;
+
+impl From<FeeFromForeignAccountComponent> for AccountComponent {
+    fn from(_: FeeFromForeignAccountComponent) -> Self {
+        let counter_slot_name = StorageSlotName::new(CALL_COUNTER_SLOT_NAME)
+            .expect("counter slot name should be valid");
+        let counter_slot = StorageSlot::with_value(counter_slot_name, Word::default());
+        
+
+        AccountComponent::new(FEE_DEDUCTION_FROM_FOREIGN_ACCOUNT_CODE_LIBRARY.clone(), vec![counter_slot])
             .expect("component should be valid")
             .with_supports_all_types()
     }

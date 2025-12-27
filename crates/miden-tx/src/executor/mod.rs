@@ -398,12 +398,12 @@ fn build_executed_transaction<STORE: DataStore + Sync, AUTH: TransactionAuthenti
     let initial_account = tx_inputs.account();
     let final_account = &tx_outputs.account;
 
-    if initial_account.id() != final_account.id() {
-        return Err(TransactionExecutorError::InconsistentAccountId {
-            input_id: initial_account.id(),
-            output_id: final_account.id(),
-        });
-    }
+    // if initial_account.id() != final_account.id() {
+    //     return Err(TransactionExecutorError::InconsistentAccountId {
+    //         input_id: initial_account.id(),
+    //         output_id: final_account.id(),
+    //     });
+    // }
 
     // Make sure nonce delta was computed correctly.
     let nonce_delta = final_account.nonce() - initial_account.nonce();

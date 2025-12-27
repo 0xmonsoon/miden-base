@@ -1,8 +1,12 @@
 use anyhow::Context;
-use miden_protocol::account::{Account, AccountBuilder, AccountStorageMode, StorageSlotName};
+use miden_protocol::account::{
+    Account, AccountBuilder, AccountId, AccountStorageMode, StorageSlotName,
+};
 use miden_protocol::errors::MasmError;
 use miden_protocol::errors::tx_kernel::ERR_EPILOGUE_AUTH_PROCEDURE_CALLED_FROM_WRONG_CONTEXT;
-use miden_protocol::testing::account_id::ACCOUNT_ID_REGULAR_PUBLIC_ACCOUNT_UPDATABLE_CODE;
+use miden_protocol::testing::account_id::{
+    ACCOUNT_ID_NATIVE_ASSET_FAUCET, ACCOUNT_ID_REGULAR_PUBLIC_ACCOUNT_UPDATABLE_CODE,
+};
 use miden_protocol::{Felt, ONE, Word};
 use miden_standards::account::wallets::BasicWallet;
 use miden_standards::code_builder::CodeBuilder;
@@ -12,11 +16,14 @@ use miden_standards::testing::account_component::{
     ERR_WRONG_ARGS_MSG,
     MockAccountComponent,
     SelfCallingAuthComponent,
+    FeeFromForeignAccountComponent
 };
 use miden_standards::testing::mock_account::MockAccountExt;
 
-use crate::{Auth, MockChainBuilder, TransactionContextBuilder, assert_transaction_executor_error};
-
+use crate::{Auth, TransactionContextBuilder, assert_transaction_executor_error, MockChain};
+use miden_protocol::asset::{Asset, FungibleAsset};
+use miden_protocol as mid;
+  
 pub const ERR_WRONG_ARGS: MasmError = MasmError::from_static_str(ERR_WRONG_ARGS_MSG);
 
 /// Tests that authentication arguments are correctly passed to the auth procedure.
@@ -156,6 +163,73 @@ async fn test_auth_procedure_reentrancy_self_call() -> anyhow::Result<()> {
         counter_value, 2,
         "counter should be 2 if reentrancy succeeded (BUG), or 1 if prevented"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_auth_procedure_fee_deduction_account() -> anyhow::Result<()> {
+
+    let native_asset_id = AccountId::try_from(ACCOUNT_ID_NATIVE_ASSET_FAUCET)?;
+
+    let mut builder =
+        MockChain::builder().verification_base_fee(50);
+
+    let native_asset = FungibleAsset::new(native_asset_id, 10000)?;
+
+    let native_account = AccountBuilder::new([42; 32])
+        .with_auth_component(FeeFromForeignAccountComponent)
+        .with_component(MockAccountComponent::with_empty_slots())
+        .storage_mode(AccountStorageMode::Public)
+        .build_existing()?;
+
+
+    let foreign_account = AccountBuilder::new([12; 32])
+        .with_auth_component(Auth::IncrNonce)
+        .with_component(MockAccountComponent::with_empty_slots())
+        .storage_mode(AccountStorageMode::Public)
+        .with_assets(vec![Asset::Fungible(native_asset)])
+        .nonce(Felt::new(2))
+        .build_existing()?;
+
+    // Create a note for the native account to consume
+    let note = builder.add_p2id_note(
+        ACCOUNT_ID_NATIVE_ASSET_FAUCET.try_into().unwrap(),
+        native_account.id(),
+        &[Asset::Fungible(native_asset)],
+        mid::note::NoteType::Public,
+    )?;
+
+    builder.add_account(native_account.clone())?;
+    builder.add_account(foreign_account.clone())?;
+
+    let mut mock_chain = builder.build()?;
+    mock_chain.prove_next_block()?;
+
+    let foreign_account_input = mock_chain
+    .get_foreign_account_inputs(foreign_account.id())
+    .expect("failed to get foreign account inputs");
+
+    let tx_context = mock_chain
+        .build_tx_context(crate::TxContextInput::Account(native_account.clone()), &[], &[note])?
+        .foreign_accounts(vec![foreign_account_input])
+        .build()?;
+
+    let execution_result = tx_context.execute().await;
+
+    let executed_tx = execution_result.expect("transaction should execute");
+
+    mock_chain.add_pending_executed_transaction(&executed_tx)?;
+    mock_chain.prove_next_block()?;
+
+    let final_native_account = mock_chain.committed_account(native_account.id())?;
+    let final_foreign_account = mock_chain.committed_account(foreign_account.id())?;
+
+    let native_balance = final_native_account.vault().get_balance(native_asset_id).unwrap_or(0);
+    let foreign_balance = final_foreign_account.vault().get_balance(native_asset_id).unwrap_or(0);
+
+    assert_eq!(native_balance, 8700);
+    assert_eq!(foreign_balance, 10000);
 
     Ok(())
 }
