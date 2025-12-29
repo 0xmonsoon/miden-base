@@ -20,7 +20,7 @@ use miden_standards::testing::account_component::{
 };
 use miden_standards::testing::mock_account::MockAccountExt;
 
-use crate::{Auth, TransactionContextBuilder, assert_transaction_executor_error, MockChain};
+use crate::{Auth, TransactionContextBuilder, assert_transaction_executor_error, MockChain, MockChainBuilder};
 use miden_protocol::asset::{Asset, FungibleAsset};
 use miden_protocol as mid;
   

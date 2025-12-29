@@ -173,7 +173,7 @@ static FEE_DEDUCTION_FROM_FOREIGN_ACCOUNT_CODE: LazyLock<String> = LazyLock::new
             push.0
             # => [pad(13)]
 
-            push.{foreign_account_id_prefix} push.{foreign_account_id_suffix}
+            push.{foreign_account_id_suffix} push.{foreign_account_id_prefix}
             # => [foreign_account_id_suffix, foreign_account_id_prefix, pad(13)]
 
             exec.kernel_proc_offsets::tx_start_foreign_context_offset
@@ -183,8 +183,8 @@ static FEE_DEDUCTION_FROM_FOREIGN_ACCOUNT_CODE: LazyLock<String> = LazyLock::new
             exec.sys::truncate_stack
         end
     "#,
-    foreign_account_id_suffix = FOREIGN_ACCOUNT.id().prefix().as_felt(),
-    foreign_account_id_prefix = FOREIGN_ACCOUNT.id().suffix(),
+    foreign_account_id_prefix = FOREIGN_ACCOUNT.id().prefix().as_felt(),
+    foreign_account_id_suffix = FOREIGN_ACCOUNT.id().suffix(),
   )
 });
 
