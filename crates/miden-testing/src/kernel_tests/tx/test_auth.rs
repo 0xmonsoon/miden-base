@@ -177,19 +177,20 @@ async fn test_auth_procedure_fee_deduction_account() -> anyhow::Result<()> {
 
     let native_asset = FungibleAsset::new(native_asset_id, 10000)?;
 
-    let native_account = AccountBuilder::new([42; 32])
-        .with_auth_component(FeeFromForeignAccountComponent)
-        .with_component(MockAccountComponent::with_empty_slots())
-        .storage_mode(AccountStorageMode::Public)
-        .build_existing()?;
-
-
+    // Create the foreign account first so we can reference its ID
     let foreign_account = AccountBuilder::new([12; 32])
         .with_auth_component(Auth::IncrNonce)
         .with_component(MockAccountComponent::with_empty_slots())
         .storage_mode(AccountStorageMode::Public)
         .with_assets(vec![Asset::Fungible(native_asset)])
         .nonce(Felt::new(2))
+        .build_existing()?;
+
+    // Now create the native account with a component that references the foreign account
+    let native_account = AccountBuilder::new([42; 32])
+        .with_auth_component(FeeFromForeignAccountComponent::new(foreign_account.id()))
+        .with_component(MockAccountComponent::with_empty_slots())
+        .storage_mode(AccountStorageMode::Public)
         .build_existing()?;
 
     // Create a note for the native account to consume
@@ -204,7 +205,6 @@ async fn test_auth_procedure_fee_deduction_account() -> anyhow::Result<()> {
     builder.add_account(foreign_account.clone())?;
 
     let mut mock_chain = builder.build()?;
-    mock_chain.prove_next_block()?;
 
     let foreign_account_input = mock_chain
     .get_foreign_account_inputs(foreign_account.id())

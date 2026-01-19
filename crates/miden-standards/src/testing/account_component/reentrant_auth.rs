@@ -134,20 +134,10 @@ impl From<SelfCallingAuthComponent> for AccountComponent {
     }
 }
 
-static FOREIGN_ACCOUNT: LazyLock<Account> = LazyLock::new(|| {
-    let native_asset_id = AccountId::try_from(ACCOUNT_ID_NATIVE_ASSET_FAUCET).unwrap();
-    let native_asset = FungibleAsset::new(native_asset_id, 10000).unwrap();
-
-    AccountBuilder::new([12; 32])
-        .with_auth_component(IncrNonceAuthComponent)
-        .with_component(MockAccountComponent::with_empty_slots())
-        .storage_mode(AccountStorageMode::Public)
-        .with_assets(vec![Asset::Fungible(native_asset)])
-        .build_existing()
-        .unwrap()
-});
-
-static FEE_DEDUCTION_FROM_FOREIGN_ACCOUNT_CODE: LazyLock<String> = LazyLock::new(|| {
+/// Generates MASM code for an auth component that switches to a foreign account context.
+///
+/// This is designed to test foreign account context switching during authentication.
+fn generate_fee_deduction_from_foreign_account_code(foreign_account_id: AccountId) -> String {
     format!(
         r#"
         use miden::protocol::native_account
@@ -183,31 +173,39 @@ static FEE_DEDUCTION_FROM_FOREIGN_ACCOUNT_CODE: LazyLock<String> = LazyLock::new
             exec.sys::truncate_stack
         end
     "#,
-    foreign_account_id_prefix = FOREIGN_ACCOUNT.id().prefix().as_felt(),
-    foreign_account_id_suffix = FOREIGN_ACCOUNT.id().suffix(),
-  )
-});
+        foreign_account_id_prefix = foreign_account_id.prefix().as_felt(),
+        foreign_account_id_suffix = foreign_account_id.suffix(),
+    )
+}
 
-static FEE_DEDUCTION_FROM_FOREIGN_ACCOUNT_CODE_LIBRARY: LazyLock<AccountComponentCode> = LazyLock::new(|| {
-    CodeBuilder::default()
-        .compile_component_code("mock::fee_deduction_from_foreign_account", FEE_DEDUCTION_FROM_FOREIGN_ACCOUNT_CODE.as_str())
-        .expect("fee deduction from foreign account should be valid")
-});
-
-/// An auth component that attempts to call itself recursively.
+/// An auth component that switches to a foreign account context during authentication.
 ///
-/// This is designed to test whether the kernel properly prevents reentrancy
-/// when an auth procedure tries to invoke itself during execution.
-pub struct FeeFromForeignAccountComponent;
+/// This is designed to test whether the kernel properly handles foreign account context
+/// switches during authentication and to verify that fees are deducted from the native
+/// account even when a foreign account context is active.
+pub struct FeeFromForeignAccountComponent {
+    foreign_account_id: AccountId,
+}
+
+impl FeeFromForeignAccountComponent {
+    /// Creates a new `FeeFromForeignAccountComponent` with the specified foreign account ID.
+    pub fn new(foreign_account_id: AccountId) -> Self {
+        Self { foreign_account_id }
+    }
+}
 
 impl From<FeeFromForeignAccountComponent> for AccountComponent {
-    fn from(_: FeeFromForeignAccountComponent) -> Self {
+    fn from(component: FeeFromForeignAccountComponent) -> Self {
         let counter_slot_name = StorageSlotName::new(CALL_COUNTER_SLOT_NAME)
             .expect("counter slot name should be valid");
         let counter_slot = StorageSlot::with_value(counter_slot_name, Word::default());
         
+        let code = generate_fee_deduction_from_foreign_account_code(component.foreign_account_id);
+        let library = CodeBuilder::default()
+            .compile_component_code("mock::fee_deduction_from_foreign_account", &code)
+            .expect("fee deduction from foreign account should be valid");
 
-        AccountComponent::new(FEE_DEDUCTION_FROM_FOREIGN_ACCOUNT_CODE_LIBRARY.clone(), vec![counter_slot])
+        AccountComponent::new(library, vec![counter_slot])
             .expect("component should be valid")
             .with_supports_all_types()
     }
